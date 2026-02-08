@@ -120,10 +120,7 @@ Apache License 2.0 - see [LICENSE](LICENSE) for details.
 - All our amazing contributors
 
 ## 📞 Support
-
-- 🐛 [Report Issues](https://github.com/glovix/glovix-opensource/issues)
-- 💬 [Discussions](https://github.com/glovix/glovix-opensource/discussions)
-- 📧 Email: support@glovix.tech
+- 📧 Email: mail@askhub.tech
 
 ---
 
