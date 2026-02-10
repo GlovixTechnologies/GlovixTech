@@ -120,7 +120,7 @@ Apache License 2.0 - see [LICENSE](LICENSE) for details.
 - All our amazing contributors
 
 ## 📞 Support
-- 📧 Email: support@glovix.tech
+- 📧 Email: mail@askhub.tech
 
 ---
 
