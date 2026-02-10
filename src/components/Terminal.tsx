@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useCallback } from 'react';
 import { Terminal as XTerminal } from 'xterm';
 import { FitAddon } from 'xterm-addon-fit';
 import 'xterm/css/xterm.css';
@@ -11,52 +11,113 @@ export function Terminal() {
     const fitAddonRef = useRef<FitAddon | null>(null);
     const shellStartedRef = useRef(false);
     const isDisposedRef = useRef(false);
-    const { terminalOutput, theme } = useStore();
     const lastOutputIndex = useRef(0);
+
+    const terminalOutput = useStore(s => s.terminalOutput);
+    const theme = useStore(s => s.theme);
     const isDark = theme === 'dark';
 
-    // Initialize terminal
+    // Buffer for sending shell output to error parser (debounced)
+    const shellBufferRef = useRef('');
+    const shellParseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+    const flushShellErrors = useCallback(() => {
+        const buf = shellBufferRef.current;
+        if (!buf) return;
+        shellBufferRef.current = '';
+        try {
+            useStore.getState().parseOutputForErrors(buf);
+        } catch { /* ignore */ }
+    }, []);
+
+    const darkTheme = {
+        background: '#0a0a0a',
+        foreground: '#d4d4d4',
+        cursor: '#528bff',
+        cursorAccent: '#0a0a0a',
+        selectionBackground: '#264f78',
+        selectionForeground: '#ffffff',
+        black: '#0a0a0a',
+        brightBlack: '#5a5a5a',
+        red: '#f44747',
+        brightRed: '#f97583',
+        green: '#4ec9b0',
+        brightGreen: '#56d364',
+        yellow: '#e5c07b',
+        brightYellow: '#e2c08d',
+        blue: '#528bff',
+        brightBlue: '#79c0ff',
+        magenta: '#c678dd',
+        brightMagenta: '#d2a8ff',
+        cyan: '#56b6c2',
+        brightCyan: '#76e4f7',
+        white: '#d4d4d4',
+        brightWhite: '#ffffff',
+    };
+
+    const lightTheme = {
+        background: '#ffffff',
+        foreground: '#24292e',
+        cursor: '#0366d6',
+        cursorAccent: '#ffffff',
+        selectionBackground: '#0366d633',
+        selectionForeground: '#24292e',
+        black: '#24292e',
+        brightBlack: '#6a737d',
+        red: '#d73a49',
+        brightRed: '#cb2431',
+        green: '#22863a',
+        brightGreen: '#28a745',
+        yellow: '#b08800',
+        brightYellow: '#dbab09',
+        blue: '#0366d6',
+        brightBlue: '#2188ff',
+        magenta: '#6f42c1',
+        brightMagenta: '#8a63d2',
+        cyan: '#1b7c83',
+        brightCyan: '#3192aa',
+        white: '#d1d5da',
+        brightWhite: '#fafbfc',
+    };
+
+    // Fit terminal to container
+    const fitTerminal = useCallback(() => {
+        if (isDisposedRef.current) return;
+        try {
+            if (terminalRef.current && xtermRef.current && fitAddonRef.current) {
+                const el = xtermRef.current.element;
+                if (!el || !el.offsetParent) return;
+                const rect = terminalRef.current.getBoundingClientRect();
+                if (rect.width > 20 && rect.height > 20) {
+                    fitAddonRef.current.fit();
+                    resizeShell(xtermRef.current.cols, xtermRef.current.rows);
+                }
+            }
+        } catch {
+            // Ignore fit errors
+        }
+    }, []);
+
+    // ── Initialize terminal — runs once ──────────────────────
     useEffect(() => {
         if (!terminalRef.current) return;
 
         isDisposedRef.current = false;
-        console.log('[Terminal] Initializing xterm...');
 
         const term = new XTerminal({
-            theme: isDark ? {
-                background: '#141414',
-                foreground: '#e5e5e5',
-                cursor: '#3b82f6',
-                selectionBackground: '#334155',
-                black: '#141414',
-                brightBlack: '#666666',
-                red: '#ef4444',
-                brightRed: '#f87171',
-                green: '#22c55e',
-                brightGreen: '#4ade80',
-                yellow: '#eab308',
-                brightYellow: '#facc15',
-                blue: '#3b82f6',
-                brightBlue: '#60a5fa',
-                magenta: '#a855f7',
-                brightMagenta: '#c084fc',
-                cyan: '#06b6d4',
-                brightCyan: '#22d3ee',
-                white: '#e5e5e5',
-                brightWhite: '#ffffff',
-            } : {
-                background: '#ffffff',
-                foreground: '#1f2937',
-                cursor: '#3b82f6',
-                selectionBackground: '#bfdbfe',
-            },
-            fontFamily: 'JetBrains Mono, Menlo, Monaco, "Courier New", monospace',
+            theme: isDark ? darkTheme : lightTheme,
+            fontFamily: '"JetBrains Mono", "Fira Code", "Cascadia Code", Menlo, Monaco, "Courier New", monospace',
             fontSize: 13,
-            lineHeight: 1.5,
+            lineHeight: 1.0,
+            letterSpacing: 0,
             cursorBlink: true,
+            cursorStyle: 'bar',
+            cursorWidth: 2,
             convertEol: true,
             allowProposedApi: true,
-            scrollback: 1000,
+            scrollback: 5000,
+            smoothScrollDuration: 0,
+            minimumContrastRatio: 4.5,
         });
 
         const fitAddon = new FitAddon();
@@ -66,153 +127,105 @@ export function Terminal() {
         term.open(terminalRef.current);
         xtermRef.current = term;
 
-        console.log('[Terminal] xterm opened');
-
         // Restore terminal history from store
-        if (terminalOutput.length > 0) {
-            console.log('[Terminal] Restoring history:', terminalOutput.length, 'entries');
-            terminalOutput.forEach(output => {
-                if (!isDisposedRef.current) {
-                    term.write(output);
-                }
+        const currentOutput = useStore.getState().terminalOutput;
+        if (currentOutput.length > 0) {
+            currentOutput.forEach(output => {
+                if (!isDisposedRef.current) term.write(output);
             });
-            lastOutputIndex.current = terminalOutput.length;
+            lastOutputIndex.current = currentOutput.length;
         }
 
-        // Safe fit function with disposed check
-        const fitTerminal = () => {
-            if (isDisposedRef.current) return;
-            try {
-                // Check if element is actually visible in DOM
-                if (terminalRef.current && xtermRef.current && fitAddonRef.current) {
-                    // Safety check for xterm internals
-                    // @ts-ignore
-                    if (!xtermRef.current.element || !xtermRef.current.element.offsetParent) {
-                        return; // Terminal not visible/mounted
-                    }
+        // Fit after layout settles
+        const fitTimeout = setTimeout(fitTerminal, 150);
 
-                    const rect = terminalRef.current.getBoundingClientRect();
-                    if (rect.width > 10 && rect.height > 10) {
-                        fitAddonRef.current.fit();
-                        resizeShell(xtermRef.current.cols, xtermRef.current.rows);
-                    }
-                }
-            } catch (e) {
-                // Ignore fit errors - commonly happens if viewport is not ready
-                console.warn('Axterm fit error:', e);
-            }
-        };
-
-        // Delay fit to ensure container is rendered
-        const fitTimeout = setTimeout(fitTerminal, 300);
-
-        // Start interactive shell
+        // Start interactive shell (once)
         if (!shellStartedRef.current) {
             shellStartedRef.current = true;
-            console.log('[Terminal] Starting shell...');
 
             startShell((data) => {
-                if (xtermRef.current && !isDisposedRef.current) {
-                    xtermRef.current.write(data);
-                }
-            }).then(() => {
-                console.log('[Terminal] Shell started successfully');
+                if (!xtermRef.current || isDisposedRef.current) return;
+
+                // Write ALL shell output directly to xterm — no filtering.
+                // Interactive shell needs raw pass-through for prompts,
+                // cursor movement, colors, etc.
+                xtermRef.current.write(data);
+
+                // Also buffer for error parsing (debounced)
+                shellBufferRef.current += data;
+                if (shellParseTimerRef.current) clearTimeout(shellParseTimerRef.current);
+                shellParseTimerRef.current = setTimeout(flushShellErrors, 500);
             }).catch((err) => {
-                console.error('[Terminal] Shell failed to start:', err);
+                console.error('[Terminal] Shell failed:', err);
+                if (xtermRef.current && !isDisposedRef.current) {
+                    xtermRef.current.write(`\r\n\x1b[31mShell failed to start: ${err.message}\x1b[0m\r\n`);
+                }
             });
         }
 
-        // Handle user input - send to shell
+        // User input → shell
         const dataHandler = term.onData((data) => {
-            if (!isDisposedRef.current) {
-                console.log('[Terminal] User typed:', JSON.stringify(data));
-                writeToShell(data);
-            }
+            if (!isDisposedRef.current) writeToShell(data);
         });
 
-        // Handle resize with debounce
-        let resizeTimeout: NodeJS.Timeout;
-        const handleResize = () => {
+        // Auto-fit on container resize
+        let resizeTimeout: ReturnType<typeof setTimeout>;
+        const resizeObserver = new ResizeObserver(() => {
+            clearTimeout(resizeTimeout);
+            resizeTimeout = setTimeout(fitTerminal, 50);
+        });
+        if (terminalRef.current) resizeObserver.observe(terminalRef.current);
+
+        const handleWindowResize = () => {
             clearTimeout(resizeTimeout);
             resizeTimeout = setTimeout(fitTerminal, 100);
         };
-        window.addEventListener('resize', handleResize);
+        window.addEventListener('resize', handleWindowResize);
 
         return () => {
-            console.log('[Terminal] Disposing...');
             isDisposedRef.current = true;
             clearTimeout(fitTimeout);
             clearTimeout(resizeTimeout);
+            if (shellParseTimerRef.current) clearTimeout(shellParseTimerRef.current);
             dataHandler.dispose();
-            window.removeEventListener('resize', handleResize);
-
-            // Delay dispose to avoid race conditions
-            setTimeout(() => {
-                try {
-                    term.dispose();
-                } catch (e) {
-                    // Ignore dispose errors
-                }
-            }, 50);
+            resizeObserver.disconnect();
+            window.removeEventListener('resize', handleWindowResize);
+            setTimeout(() => { try { term.dispose(); } catch {} }, 50);
         };
-    }, []);
+    }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-    // Write AI command output to terminal
+    // ── Write AI command output to terminal (from store) ──
     useEffect(() => {
         if (xtermRef.current && !isDisposedRef.current) {
-            const term = xtermRef.current;
             for (let i = lastOutputIndex.current; i < terminalOutput.length; i++) {
-                term.write(terminalOutput[i]);
+                xtermRef.current.write(terminalOutput[i]);
             }
             lastOutputIndex.current = terminalOutput.length;
         }
     }, [terminalOutput]);
 
-    // Update terminal theme when theme changes
+    // Update theme
     useEffect(() => {
         if (xtermRef.current && !isDisposedRef.current) {
-            xtermRef.current.options.theme = isDark ? {
-                background: '#141414',
-                foreground: '#e5e5e5',
-                cursor: '#3b82f6',
-                selectionBackground: '#334155',
-                black: '#141414',
-                brightBlack: '#666666',
-                red: '#ef4444',
-                brightRed: '#f87171',
-                green: '#22c55e',
-                brightGreen: '#4ade80',
-                yellow: '#eab308',
-                brightYellow: '#facc15',
-                blue: '#3b82f6',
-                brightBlue: '#60a5fa',
-                magenta: '#a855f7',
-                brightMagenta: '#c084fc',
-                cyan: '#06b6d4',
-                brightCyan: '#22d3ee',
-                white: '#e5e5e5',
-                brightWhite: '#ffffff',
-            } : {
-                background: '#ffffff',
-                foreground: '#1f2937',
-                cursor: '#3b82f6',
-                selectionBackground: '#bfdbfe',
-            };
+            xtermRef.current.options.theme = isDark ? darkTheme : lightTheme;
         }
-    }, [isDark]);
+    }, [isDark]); // eslint-disable-line react-hooks/exhaustive-deps
 
-    const handleClick = () => {
-        if (xtermRef.current && !isDisposedRef.current) {
-            xtermRef.current.focus();
-        }
-    };
+    // Re-fit when terminal tab becomes visible
+    useEffect(() => {
+        const timer = setTimeout(fitTerminal, 200);
+        return () => clearTimeout(timer);
+    }, [fitTerminal]);
 
     return (
-        <div className={`h-full w-full overflow-hidden p-2 ${isDark ? 'bg-[#141414]' : 'bg-white'}`}>
+        <div
+            className="h-full w-full overflow-hidden"
+            style={{ backgroundColor: isDark ? '#0a0a0a' : '#ffffff' }}
+        >
             <div
                 ref={terminalRef}
-                onClick={handleClick}
-                className="h-full w-full cursor-text overflow-hidden"
+                onClick={() => xtermRef.current?.focus()}
+                className="h-full w-full cursor-text"
             />
         </div>
     );

@@ -6,7 +6,7 @@ import { useStore } from './store';
 import { getCurrentUser } from './lib/auth';
 import { getChatMessages, getProject, getChat } from './lib/api';
 import { useAutoSave } from './lib/autoSave';
-import { mountFiles } from './lib/webcontainer';
+import { mountFiles, autoInstallDependencies } from './lib/webcontainer';
 
 function HomePageRoute() {
     const { setCurrentChatId, setMessages, setFiles } = useStore();
@@ -76,6 +76,11 @@ function ChatPage() {
                     console.log('[App] Mounting files to WebContainer...');
                     await mountFiles(files);
                     console.log('[App] Files mounted successfully');
+                    // Auto-detect and install missing dependencies
+                    const addOutput = useStore.getState().addTerminalOutput;
+                    autoInstallDependencies(files, addOutput).catch(err => {
+                        console.error('[App] Auto-install failed:', err);
+                    });
                 }
             } else if (Object.keys(currentState.files).length === 0) {
                 setFiles({});

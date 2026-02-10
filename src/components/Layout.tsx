@@ -1,16 +1,21 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { ChevronDown, Home, Settings, Edit3, Moon, Sun } from 'lucide-react';
+import { ChevronDown, Home, Settings, Edit3, Moon, Sun, GitFork, Loader2 } from 'lucide-react';
 import { Chat } from './Chat';
 import { Workbench } from './Workbench';
 import { SettingsModal } from './SettingsModal';
 import { StreamingText } from './StreamingText';
 import { useStore } from '../store';
 import { updateChatTitle } from '../lib/api';
+import { forkChat } from '../lib/forkChat';
 
 export function Layout() {
     const navigate = useNavigate();
-    const { theme, setTheme, currentChatId, chats, user } = useStore();
+    const theme = useStore(s => s.theme);
+    const setTheme = useStore(s => s.setTheme);
+    const currentChatId = useStore(s => s.currentChatId);
+    const chats = useStore(s => s.chats);
+    const user = useStore(s => s.user);
     const chatScrollRef = useRef<HTMLDivElement>(null);
     const scrollbarRef = useRef<HTMLDivElement>(null);
     const thumbRef = useRef<HTMLDivElement>(null);
@@ -25,6 +30,7 @@ export function Layout() {
     const [showSettings, setShowSettings] = useState(false);
     const [isRenaming, setIsRenaming] = useState(false);
     const [newTitle, setNewTitle] = useState('');
+    const [isForking, setIsForking] = useState(false);
     const projectMenuRef = useRef<HTMLDivElement>(null);
     const renameInputRef = useRef<HTMLInputElement>(null);
 
@@ -82,6 +88,26 @@ export function Layout() {
             setIsRenaming(false);
         } catch (err) {
             console.error('Failed to rename:', err);
+        }
+    };
+
+    // Handle fork — create new chat with compressed context
+    const handleFork = async () => {
+        if (isForking || !currentChatId) return;
+        setIsForking(true);
+        setShowProjectMenu(false);
+        try {
+            const newChatId = await forkChat();
+            // Clear current state so ChatPage loads the new chat fresh
+            const store = useStore.getState();
+            store.setMessages([]);
+            store.setCurrentChatId(null);
+            // Navigate to the new forked chat
+            navigate(`/c/${newChatId}`);
+        } catch (err) {
+            console.error('Failed to fork:', err);
+        } finally {
+            setIsForking(false);
         }
     };
 
@@ -286,6 +312,14 @@ export function Layout() {
                                     >
                                         {isDark ? <Sun className="w-5 h-5" /> : <Moon className="w-5 h-5" />}
                                         <span className="text-[10px] font-medium">{isDark ? 'Light' : 'Dark'}</span>
+                                    </button>
+                                    <button
+                                        onClick={handleFork}
+                                        disabled={isForking || !currentChatId}
+                                        className={`flex flex-col items-center gap-1.5 p-3 rounded-xl transition-all disabled:opacity-30 ${isDark ? 'hover:bg-[#252525] text-[#888] hover:text-white' : 'hover:bg-gray-100 text-gray-500 hover:text-gray-900'}`}
+                                    >
+                                        {isForking ? <Loader2 className="w-5 h-5 animate-spin" /> : <GitFork className="w-5 h-5" />}
+                                        <span className="text-[10px] font-medium">Fork</span>
                                     </button>
                                 </div>
                             </div>

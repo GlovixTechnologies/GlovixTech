@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, memo } from 'react';
 
 interface StreamingTextProps {
     text: string;
@@ -6,12 +6,11 @@ interface StreamingTextProps {
     speed?: number; // ms per character
 }
 
-export function StreamingText({ text, className = '', speed = 30 }: StreamingTextProps) {
+export const StreamingText = memo(function StreamingText({ text, className = '', speed = 30 }: StreamingTextProps) {
     const [displayedText, setDisplayedText] = useState('');
     const [currentIndex, setCurrentIndex] = useState(0);
 
     useEffect(() => {
-        // Reset when text changes
         setDisplayedText('');
         setCurrentIndex(0);
     }, [text]);
@@ -22,26 +21,16 @@ export function StreamingText({ text, className = '', speed = 30 }: StreamingTex
                 setDisplayedText(text.slice(0, currentIndex + 1));
                 setCurrentIndex(currentIndex + 1);
             }, speed);
-
             return () => clearTimeout(timeout);
         }
     }, [currentIndex, text, speed]);
 
     return (
         <span className={className}>
-            {displayedText.split('').map((char, i) => (
-                <span
-                    key={i}
-                    className="inline-block animate-fade-in"
-                    style={{
-                        animationDelay: `${i * 0.02}s`,
-                        animationDuration: '0.3s',
-                        animationFillMode: 'backwards'
-                    }}
-                >
-                    {char}
-                </span>
-            ))}
+            {displayedText}
+            {currentIndex < text.length && (
+                <span className="animate-pulse">|</span>
+            )}
         </span>
     );
-}
+});

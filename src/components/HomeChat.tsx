@@ -61,6 +61,10 @@ export function HomeChat() {
             const title = input.slice(0, 50) + (input.length > 50 ? '...' : '');
             const chat = await createChat(user.uid, title);
 
+            // Update chats in store so titleGenerator can find this chat
+            const currentChats = useStore.getState().chats;
+            useStore.getState().setChats([chat, ...currentChats]);
+
             // Create user message
             let userMessage: Message;
             if (selectedImages.length > 0) {

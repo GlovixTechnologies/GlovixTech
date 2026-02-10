@@ -29,8 +29,8 @@
 
 1.  **Clone the repository**:
     ```bash
-    git clone https://github.com/glovix/glovix-opensource.git
-    cd glovix-opensource
+    git clone https://github.com/glovix/glovixtech.git
+    cd glovixtech
     ```
 
 2.  **Install dependencies**:
@@ -58,7 +58,7 @@
     ```
 
 5.  **Open in Browser**:
-    Navigate to `http://localhost:5173`
+    Navigate to `http://localhost:5174`
 
 ## 🔧 Configuration
 
@@ -120,9 +120,6 @@ Apache License 2.0 - see [LICENSE](LICENSE) for details.
 - All our amazing contributors
 
 ## 📞 Support
-
-- 🐛 [Report Issues](https://github.com/glovix/glovix-opensource/issues)
-- 💬 [Discussions](https://github.com/glovix/glovix-opensource/discussions)
 - 📧 Email: support@glovix.tech
 
 ---

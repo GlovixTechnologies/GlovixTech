@@ -1,7 +1,7 @@
 import Editor, { loader, Monaco } from '@monaco-editor/react';
 import * as monaco from 'monaco-editor';
 import { useStore } from '../store';
-import { useRef } from 'react';
+import { useRef, useCallback, memo } from 'react';
 
 loader.config({ monaco });
 
@@ -15,16 +15,17 @@ const getLanguage = (filename: string): string => {
     return langMap[ext || ''] || 'plaintext';
 };
 
-export function CodeEditor() {
-    const { files, setFiles, selectedFile, theme } = useStore();
+export const CodeEditor = memo(function CodeEditor() {
+    const selectedFile = useStore(s => s.selectedFile);
+    const theme = useStore(s => s.theme);
     const isDark = theme === 'dark';
     const monacoRef = useRef<Monaco | null>(null);
 
-    const content = selectedFile ? files[selectedFile]?.file.contents : '';
+    // Read content directly from store without subscribing to all files changes
+    const content = useStore(s => s.selectedFile ? s.files[s.selectedFile]?.file.contents : '');
 
-    const handleEditorWillMount = (monaco: Monaco) => {
+    const handleEditorWillMount = useCallback((monaco: Monaco) => {
         monacoRef.current = monaco;
-        // Define custom dark theme with #141414 background
         monaco.editor.defineTheme('glovix-dark', {
             base: 'vs-dark',
             inherit: true,
@@ -41,7 +42,25 @@ export function CodeEditor() {
                 'dropdown.background': '#1a1a1a',
             }
         });
-    };
+    }, []);
+
+    const handleChange = useCallback((value: string | undefined) => {
+        const file = useStore.getState().selectedFile;
+        if (file && value !== undefined) {
+            // Mutate in-place to avoid creating a new files object on every keystroke
+            const state = useStore.getState();
+            const existing = state.files[file];
+            if (existing) {
+                existing.file.contents = value;
+                // Notify store with same reference — only triggers subscribers that check deeply
+                useStore.setState({ files: state.files });
+            } else {
+                state.files[file] = { file: { contents: value } };
+                useStore.setState({ files: state.files });
+            }
+            state.removeErrorsForFile(file);
+        }
+    }, []);
 
     if (!selectedFile) {
         return (
@@ -59,11 +78,7 @@ export function CodeEditor() {
                 value={content}
                 theme={isDark ? 'glovix-dark' : 'light'}
                 beforeMount={handleEditorWillMount}
-                onChange={(value) => {
-                    if (selectedFile && value !== undefined) {
-                        setFiles({ ...files, [selectedFile]: { file: { contents: value } } });
-                    }
-                }}
+                onChange={handleChange}
                 options={{
                     minimap: { enabled: false },
                     fontSize: 13,
@@ -78,4 +93,4 @@ export function CodeEditor() {
             />
         </div>
     );
-}
+});

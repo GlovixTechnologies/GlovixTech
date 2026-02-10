@@ -12,8 +12,8 @@ Fixes # (issue)
 ## How Has This Been Tested?
 Please describe the tests that you ran to verify your changes.
 
-- [ ] Tested locally with `npm run dev`
-- [ ] Tested production build with `npm run build && npm run preview`
+- [ ] Tested locally with `pnpm dev`
+- [ ] Tested production build with `pnpm build && pnpm preview`
 - [ ] Tested in Chrome
 - [ ] Tested in Edge
 - [ ] Tested WebContainer functionality

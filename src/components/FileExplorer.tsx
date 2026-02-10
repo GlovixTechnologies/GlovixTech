@@ -1,4 +1,4 @@
-import { useState, useMemo, useRef, useEffect } from 'react';
+import { useState, useMemo, useRef, useEffect, memo } from 'react';
 import { File, Folder, FolderOpen, ChevronRight, ChevronDown, Target, Lock, Scissors, Copy, FileText, FolderPlus, Trash2 } from 'lucide-react';
 import { useStore } from '../store';
 import { writeFile, deleteFile as deleteFileWC, renameFile as renameFileWC } from '../lib/webcontainer';
@@ -45,7 +45,7 @@ const buildFileTree = (files: string[]): FileNode[] => {
     return root;
 };
 
-const FileTreeNode = ({ 
+const FileTreeNode = memo(({ 
     node, 
     level, 
     selectedFile, 
@@ -155,12 +155,19 @@ const FileTreeNode = ({
             ))}
         </div>
     );
-};
+});
 
 export function FileExplorer() {
-    const { files, setFiles, selectedFile, setSelectedFile, theme } = useStore();
+    const files = useStore(s => s.files);
+    const setFiles = useStore(s => s.setFiles);
+    const selectedFile = useStore(s => s.selectedFile);
+    const setSelectedFile = useStore(s => s.setSelectedFile);
+    const theme = useStore(s => s.theme);
     const isDark = theme === 'dark';
-    const fileTree = useMemo(() => buildFileTree(Object.keys(files)), [files]);
+
+    // Only rebuild tree when file keys change (not content)
+    const fileKeys = useMemo(() => Object.keys(files).filter(f => f !== 'glovix-picker.js').sort().join('\n'), [files]);
+    const fileTree = useMemo(() => buildFileTree(Object.keys(files).filter(f => f !== 'glovix-picker.js')), [fileKeys]);
     const [contextMenu, setContextMenu] = useState<ContextMenuState>({ visible: false, x: 0, y: 0, targetPath: '', targetType: 'root' });
     const [renamingPath, setRenamingPath] = useState<string | null>(null);
     const [newItemType, setNewItemType] = useState<'file' | 'folder' | null>(null);
@@ -247,6 +254,12 @@ export function FileExplorer() {
     const handleDelete = async () => {
         const path = contextMenu.targetPath;
         if (!path) return;
+
+        // Protect .glovix directory from deletion
+        if (path === '.glovix' || path.startsWith('.glovix/')) {
+            setContextMenu(prev => ({ ...prev, visible: false }));
+            return;
+        }
         
         const newFiles = { ...files };
         
@@ -442,10 +455,12 @@ export function FileExplorer() {
                                 <span className="w-4" />
                                 Rename...
                             </button>
-                            <button onClick={handleDelete} className={`w-full text-left px-4 py-2 text-sm flex items-center gap-3 text-red-400 ${isDark ? 'hover:bg-[#252525]' : 'hover:bg-gray-50'}`}>
-                                <Trash2 className="w-4 h-4 opacity-0" />
-                                Delete
-                            </button>
+                            {contextMenu.targetPath !== '.glovix' && !contextMenu.targetPath.startsWith('.glovix/') && (
+                                <button onClick={handleDelete} className={`w-full text-left px-4 py-2 text-sm flex items-center gap-3 text-red-400 ${isDark ? 'hover:bg-[#252525]' : 'hover:bg-gray-50'}`}>
+                                    <Trash2 className="w-4 h-4 opacity-0" />
+                                    Delete
+                                </button>
+                            )}
                         </div>
                     )}
                 </div>

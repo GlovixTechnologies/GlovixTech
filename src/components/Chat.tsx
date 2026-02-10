@@ -1,12 +1,13 @@
-import React, { useState, useRef, useEffect, RefObject } from 'react';
+import React, { useState, useRef, useEffect, RefObject, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { FileCode, Plus, Image as ImageIcon, X, ChevronRight } from 'lucide-react';
+import { FileCode, Plus, Image as ImageIcon, X, ChevronRight, MousePointer2 } from 'lucide-react';
 import { useStore } from '../store';
 import { sendMessage, Message, ToolCall } from '../lib/ai';
 import { mountFiles } from '../lib/webcontainer';
 import { executeTool, ToolContext } from '../lib/tools';
 import { BASE_PROJECT_FILES } from '../lib/projectTemplate';
-import { saveChatMessages, saveProject, createChat, updateChatTitle } from '../lib/api';
+import { saveChatMessages, saveProject, createChat } from '../lib/api';
+import { generateAndSaveTitle } from '../lib/titleGenerator';
 import { ActionsList, StreamingAction } from './ActionsList';
 import { MermaidBlock } from './MermaidBlock';
 import { ImageViewer } from './ImageViewer';
@@ -27,9 +28,17 @@ interface FileAttachment {
 }
 
 // Helper to group messages for UI
+type ContentType = string | null | Array<{ type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string } }>;
+
+interface AssistantSegment {
+    type: 'text' | 'tools';
+    content?: ContentType;
+    toolCalls?: { call: ToolCall; result?: string }[];
+}
+
 interface MessageGroup {
     role: 'user' | 'assistant';
-    content: string | null | Array<{ type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string } }>;
+    content: ContentType; // For user messages and backward compat
     thinking?: string;
     thinkingDuration?: number;
     attachments?: FileAttachment[];
@@ -37,6 +46,8 @@ interface MessageGroup {
         call: ToolCall;
         result?: string;
     }[];
+    // Ordered segments for assistant messages (text and tool blocks in sequence)
+    segments?: AssistantSegment[];
 }
 
 interface ChatProps {
@@ -47,7 +58,6 @@ interface ChatProps {
 const getActionDisplayName = (toolName: string, args: string): string => {
     if (!toolName) return 'Preparing...';
 
-    // Helper to decode HTML entities
     const decodeHtml = (text: string): string => {
         return text
             .replace(/&amp;/g, '&')
@@ -57,43 +67,54 @@ const getActionDisplayName = (toolName: string, args: string): string => {
             .replace(/&#39;/g, "'");
     };
 
-    // Helper to extract value from partial JSON string
     const extract = (key: string) => {
         const match = args.match(new RegExp(`"${key}"\\s*:\\s*"([^"]*)`));
         return match ? decodeHtml(match[1]) : '';
     };
 
     try {
-        // Try parsing full JSON first
         const parsed = JSON.parse(args);
         switch (toolName) {
             case 'createFile': return parsed.path || '';
             case 'editFile': return parsed.path || '';
             case 'readFile': return parsed.path || '';
+            case 'readMultipleFiles': return `${(parsed.paths || []).length} files`;
             case 'deleteFile': return parsed.path || '';
             case 'renameFile': return parsed.oldPath ? `${parsed.oldPath} → ${parsed.newPath}` : '';
             case 'runCommand': return decodeHtml(parsed.command || '');
             case 'searchWeb': return decodeHtml(parsed.query || '');
+            case 'searchInFiles': return decodeHtml(parsed.query || '');
             case 'extractPage': return parsed.url || '';
             case 'typeCheck': return 'Workspace';
+            case 'lintCheck': return parsed.path || 'src/';
             case 'listFiles': return 'Workspace';
+            case 'getErrors': return 'Workspace';
+            case 'batchCreateFiles': return `${(parsed.files || []).length} files`;
+            case 'checkDependencies': return 'package.json';
             default: return '';
         }
     } catch {
-        // Fallback for partial JSON streams - extract what we can
         switch (toolName) {
             case 'createFile':
             case 'editFile':
             case 'readFile':
             case 'deleteFile':
+            case 'lintCheck':
                 return extract('path');
+            case 'readMultipleFiles':
+                return 'Multiple files';
             case 'renameFile':
                 const oldP = extract('oldPath');
                 const newP = extract('newPath');
                 return oldP ? `${oldP} → ${newP}` : oldP;
             case 'runCommand': return extract('command');
-            case 'searchWeb': return extract('query');
+            case 'searchWeb':
+            case 'searchInFiles':
+                return extract('query');
             case 'extractPage': return extract('url');
+            case 'batchCreateFiles': return 'Multiple files';
+            case 'getErrors': return 'Workspace';
+            case 'checkDependencies': return 'package.json';
             default: return '';
         }
     }
@@ -101,12 +122,23 @@ const getActionDisplayName = (toolName: string, args: string): string => {
 
 export function Chat({ scrollRef, onScroll }: ChatProps) {
     const navigate = useNavigate();
-    const {
-        messages, addMessage, setMessages, selectedModel, addTerminalOutput, updateLastMessage,
-        user, currentChatId, setCurrentChatId, theme,
-        setSelectedFile, setTokenCount, tokenCount, modelContextLimit,
-        setSystemPrompt
-    } = useStore();
+    const messages = useStore(s => s.messages);
+    const addMessage = useStore(s => s.addMessage);
+    const setMessages = useStore(s => s.setMessages);
+    const selectedModel = useStore(s => s.selectedModel);
+    const addTerminalOutput = useStore(s => s.addTerminalOutput);
+    const updateLastMessage = useStore(s => s.updateLastMessage);
+    const user = useStore(s => s.user);
+    const currentChatId = useStore(s => s.currentChatId);
+    const setCurrentChatId = useStore(s => s.setCurrentChatId);
+    const theme = useStore(s => s.theme);
+    const setSelectedFile = useStore(s => s.setSelectedFile);
+    const setTokenCount = useStore(s => s.setTokenCount);
+    const tokenCount = useStore(s => s.tokenCount);
+    const modelContextLimit = useStore(s => s.modelContextLimit);
+    const setSystemPrompt = useStore(s => s.setSystemPrompt);
+    const selectedElement = useStore(s => s.selectedElement);
+    const setSelectedElement = useStore(s => s.setSelectedElement);
 
     // Local actions state
     const [actions, setActions] = useState<StreamingAction[]>([]);
@@ -137,15 +169,13 @@ export function Chat({ scrollRef, onScroll }: ChatProps) {
     const [currentThinking, setCurrentThinking] = useState<string>('');
     const [thinkingDuration, setThinkingDuration] = useState<number>(0);
     const [thinkingStartTime, setThinkingStartTime] = useState<number | null>(null);
-    const [systemPromptTemplate, setSystemPromptTemplate] = useState<string>('');
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const abortControllerRef = useRef<AbortController | null>(null);
 
-    // Load system prompt locally
+    // Set system prompt in store for reference
     useEffect(() => {
         if (user) {
             const prompt = getSystemPrompt(selectedModel);
-            setSystemPromptTemplate(prompt);
             setSystemPrompt(prompt);
         }
     }, [user, selectedModel]);
@@ -277,82 +307,140 @@ export function Chat({ scrollRef, onScroll }: ChatProps) {
         }
     }, [currentChatId, isLoading]);
 
-    // Group messages to combine tool calls with their results and the assistant message that triggered them
-    const groupedMessages: MessageGroup[] = [];
-    let currentGroup: MessageGroup | null = null;
+    // Auto-trigger AI in forked chats — detect fork_context flag from sessionStorage
+    const forkSetupRef = useRef<string | null>(null);
+    useEffect(() => {
+        if (!currentChatId || isLoading || forkSetupRef.current === currentChatId) return;
 
-    for (const msg of messages) {
-        if (msg.role === 'user') {
-            if (currentGroup) groupedMessages.push(currentGroup);
-            currentGroup = {
-                role: 'user',
-                content: msg.content,
-                attachments: (msg as any).attachments
-            };
-        } else if (msg.role === 'assistant') {
-            const isMergeable = currentGroup &&
-                currentGroup.role === 'assistant';
+        const forkFlag = sessionStorage.getItem(`fork_context_${currentChatId}`);
+        if (forkFlag) {
+            forkSetupRef.current = currentChatId;
+            // Prevent auto-process hook from also triggering on this chat
+            autoProcessedRef.current = currentChatId;
+            sessionStorage.removeItem(`fork_context_${currentChatId}`);
 
-            if (isMergeable && currentGroup) {
-                // Merge content
-                if (msg.content) {
-                    const newContent = typeof msg.content === 'string' ? msg.content : '';
-                    if (currentGroup.content && typeof currentGroup.content === 'string') {
-                        currentGroup.content += '\n\n' + newContent;
-                    } else if (!currentGroup.content) {
-                        currentGroup.content = newContent;
-                    }
-                }
-
-                // Merge tool calls
-                if (msg.tool_calls) {
-                    const newCalls = msg.tool_calls.map(tc => ({ call: tc }));
-                    if (currentGroup.toolCalls) {
-                        currentGroup.toolCalls.push(...newCalls);
-                    } else {
-                        currentGroup.toolCalls = newCalls;
-                    }
-                }
-
-                // Keep the existing thinking or update if missing
-                if (!currentGroup.thinking && (msg as any).thinking) {
-                    currentGroup.thinking = (msg as any).thinking;
-                }
-                // Keep the existing thinkingDuration or update if missing
-                if (!currentGroup.thinkingDuration && (msg as any).thinkingDuration) {
-                    currentGroup.thinkingDuration = (msg as any).thinkingDuration;
-                }
-            } else {
-                if (currentGroup) groupedMessages.push(currentGroup);
-                currentGroup = {
-                    role: 'assistant',
-                    content: msg.content,
-                    thinking: (msg as any).thinking,
-                    thinkingDuration: (msg as any).thinkingDuration,
-                    toolCalls: msg.tool_calls?.map(tc => ({ call: tc }))
+            // Initialize base project, then send context recovery message
+            initializeBaseProject().then(() => {
+                const forkMessage: Message = {
+                    role: 'user',
+                    content: 'Continue working on the project. Read .glovix/context.md for context from the previous chat.'
                 };
-            }
-        } else if (msg.role === 'tool') {
-            if (currentGroup && currentGroup.toolCalls) {
-                const toolCallIndex = currentGroup.toolCalls.findIndex(tc => tc.call.id === msg.tool_call_id);
-                if (toolCallIndex !== -1) {
-                    const output = typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content) || '';
-                    currentGroup.toolCalls[toolCallIndex].result = output;
+                addMessage(forkMessage);
 
-                    // Automatically show generated diagrams in the chat
-                    if (output.includes('```mermaid')) {
-                        if (currentGroup.content === null) currentGroup.content = '';
-                        if (typeof currentGroup.content === 'string') {
-                            currentGroup.content += '\n\n' + output;
+                setTimeout(() => {
+                    triggerAIResponse(forkMessage, currentChatId);
+                }, 100);
+            });
+        }
+    }, [currentChatId, isLoading]);
+
+    // Group messages: user messages are standalone, consecutive assistant+tool messages form one group with segments
+    const groupedMessages = useMemo(() => {
+        const groups: MessageGroup[] = [];
+        let currentGroup: MessageGroup | null = null;
+
+        for (const msg of messages) {
+            if (msg.role === 'user') {
+                if (currentGroup) groups.push(currentGroup);
+                currentGroup = {
+                    role: 'user',
+                    content: msg.content,
+                    attachments: (msg as any).attachments,
+                    pickedElement: (msg as any).pickedElement
+                } as any;
+            } else if (msg.role === 'assistant') {
+                if (currentGroup && currentGroup.role === 'assistant') {
+                    if (!currentGroup.segments) currentGroup.segments = [];
+
+                    if (msg.content) {
+                        const textContent = typeof msg.content === 'string' ? msg.content : '';
+                        if (textContent) {
+                            const lastSeg = currentGroup.segments[currentGroup.segments.length - 1];
+                            if (lastSeg && lastSeg.type === 'text' && typeof lastSeg.content === 'string') {
+                                lastSeg.content += '\n\n' + textContent;
+                            } else {
+                                currentGroup.segments.push({ type: 'text', content: textContent });
+                            }
                         }
                     }
 
-                    // Search results block removed - don't auto-add to content
+                    if (msg.tool_calls && msg.tool_calls.length > 0) {
+                        const newCalls = msg.tool_calls.map(tc => ({ call: tc }));
+                        const lastSeg = currentGroup.segments[currentGroup.segments.length - 1];
+                        if (lastSeg && lastSeg.type === 'tools') {
+                            lastSeg.toolCalls!.push(...newCalls);
+                        } else {
+                            currentGroup.segments.push({ type: 'tools', toolCalls: newCalls });
+                        }
+                        if (!currentGroup.toolCalls) currentGroup.toolCalls = [];
+                        currentGroup.toolCalls.push(...newCalls);
+                    }
+
+                    if (!currentGroup.thinking && (msg as any).thinking) {
+                        currentGroup.thinking = (msg as any).thinking;
+                    }
+                    if (!currentGroup.thinkingDuration && (msg as any).thinkingDuration) {
+                        currentGroup.thinkingDuration = (msg as any).thinkingDuration;
+                    }
+                } else {
+                    if (currentGroup) groups.push(currentGroup);
+
+                    const segments: AssistantSegment[] = [];
+                    if (msg.content) {
+                        segments.push({ type: 'text', content: msg.content });
+                    }
+                    if (msg.tool_calls && msg.tool_calls.length > 0) {
+                        segments.push({ type: 'tools', toolCalls: msg.tool_calls.map(tc => ({ call: tc })) });
+                    }
+
+                    currentGroup = {
+                        role: 'assistant',
+                        content: msg.content,
+                        thinking: (msg as any).thinking,
+                        thinkingDuration: (msg as any).thinkingDuration,
+                        toolCalls: msg.tool_calls?.map(tc => ({ call: tc })),
+                        segments
+                    };
+                }
+            } else if (msg.role === 'tool') {
+                if (currentGroup) {
+                    const output = typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content) || '';
+
+                    if (currentGroup.toolCalls) {
+                        const toolCallIndex = currentGroup.toolCalls.findIndex(tc => tc.call.id === msg.tool_call_id);
+                        if (toolCallIndex !== -1) {
+                            currentGroup.toolCalls[toolCallIndex].result = output;
+                        }
+                    }
+
+                    if (currentGroup.segments) {
+                        for (const seg of currentGroup.segments) {
+                            if (seg.type === 'tools' && seg.toolCalls) {
+                                const tc = seg.toolCalls.find(tc => tc.call.id === msg.tool_call_id);
+                                if (tc) {
+                                    tc.result = output;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    if (output.includes('```mermaid')) {
+                        if (currentGroup.segments) {
+                            const lastTextSeg = [...currentGroup.segments].reverse().find(s => s.type === 'text');
+                            if (lastTextSeg && typeof lastTextSeg.content === 'string') {
+                                lastTextSeg.content += '\n\n' + output;
+                            } else {
+                                currentGroup.segments.push({ type: 'text', content: output });
+                            }
+                        }
+                    }
                 }
             }
         }
-    }
-    if (currentGroup) groupedMessages.push(currentGroup);
+        if (currentGroup) groups.push(currentGroup);
+        return groups;
+    }, [messages]);
 
     const handleStop = () => {
         if (abortControllerRef.current) {
@@ -372,7 +460,22 @@ export function Chat({ scrollRef, onScroll }: ChatProps) {
 
     const handleToolCall = async (toolCall: ToolCall): Promise<string> => {
         const { name, arguments: argsString } = toolCall.function;
-        return executeTool(name, argsString, toolContext);
+        const result = await executeTool(name, argsString, toolContext);
+
+        // Auto-retry logic for editFile failures: read the file and provide content in error
+        if (name === 'editFile' && result.includes('Error editing') && result.includes('Could not find')) {
+            try {
+                const args = JSON.parse(argsString);
+                if (args.path) {
+                    const fileContent = await executeTool('readFile', JSON.stringify({ path: args.path }), toolContext);
+                    return `${result}\n\n📄 Current file content for reference:\n${fileContent}`;
+                }
+            } catch {
+                // If we can't parse args, just return original error
+            }
+        }
+
+        return result;
     };
 
     const [selectedImages, setSelectedImages] = useState<string[]>([]);
@@ -495,13 +598,14 @@ export function Chat({ scrollRef, onScroll }: ChatProps) {
 
         // Get current project files for context
         const currentFiles = useStore.getState().files;
-        const fileList = Object.keys(currentFiles).sort().join('\n') ||
+        const fileList = Object.keys(currentFiles).filter(f => f !== 'glovix-picker.js').sort().join('\n') ||
             'package.json, vite.config.ts, tsconfig.json, tailwind.config.js, postcss.config.js, index.html, src/main.tsx, src/App.tsx, src/index.css';
 
-        // Build system prompt from template
-        const promptContent = systemPromptTemplate
-            ? systemPromptTemplate.replace('{{FILE_LIST}}', fileList)
-            : `You are Glovix, an AI web developer. Project files: ${fileList}. Use tools to create/modify files. Run npm install && npm run dev to start.`;
+        // Build system prompt — always get fresh from getSystemPrompt
+        const currentSystemPrompt = getSystemPrompt(selectedModel);
+        const promptContent = currentSystemPrompt
+            ? currentSystemPrompt.replace('{{FILE_LIST}}', fileList)
+            : `You are Glovix, an AI web developer. Project files: ${fileList}. Use tools to create/modify files. Run pnpm install then pnpm run dev to start.`;
 
         const SYSTEM_PROMPT: Message = {
             role: 'system',
@@ -534,10 +638,19 @@ export function Chat({ scrollRef, onScroll }: ChatProps) {
         // Get current messages from store (not from hook to ensure freshness)
         const currentStoreMessages = useStore.getState().messages;
 
-        // Filter out invalid messages
+        // Filter out truly invalid messages (but keep assistant placeholders and tool messages)
         const validMessages = currentStoreMessages.filter((msg) => {
-            if (!msg.role || (msg.role !== 'system' && !msg.content && !msg.tool_calls)) {
-                console.warn('Skipping invalid message:', msg);
+            if (!msg.role) return false;
+            // System messages need content
+            if (msg.role === 'system') return !!msg.content;
+            // Tool messages need tool_call_id
+            if (msg.role === 'tool') return !!msg.tool_call_id;
+            // Assistant messages: keep if has content (even empty string) or tool_calls
+            if (msg.role === 'assistant') return msg.content !== undefined || (msg.tool_calls && msg.tool_calls.length > 0);
+            // User messages need non-empty content
+            if (msg.role === 'user') {
+                if (typeof msg.content === 'string') return msg.content.length > 0;
+                if (Array.isArray(msg.content)) return msg.content.length > 0;
                 return false;
             }
             return true;
@@ -586,64 +699,26 @@ export function Chat({ scrollRef, onScroll }: ChatProps) {
         // Track files created in this session to detect loops
         const filesCreatedThisSession = new Set<string>();
         let sameFileCreatedCount = 0;
+        let consecutiveErrorCount = 0;
+        let editFileFailCount = 0;
+        const MAX_CONSECUTIVE_ERRORS = 5;
+        const MAX_EDIT_FAILS = 4;
 
         try {
             // Auto-generate title for new chats (first message only)
+            // Uses separate titleGenerator module — runs in background, never blocks
             if (currentStoreMessages.length === 1 && user && chatId) {
                 const userContentStr = typeof userMessage.content === 'string'
                     ? userMessage.content
                     : (Array.isArray(userMessage.content) ? (userMessage.content.find(c => c.type === 'text') as { type: 'text', text: string } | undefined)?.text || '' : '');
 
                 if (userContentStr) {
-                    const titlePrompt: Message = {
-                        role: 'system',
-                        content: `You are a title generator. Generate a short, clear title (2-5 words) that describes what the user wants to build or do. 
-
-Rules:
-- Be specific and descriptive
-- Use simple, clear language
-- No quotes, no punctuation at the end
-- Even if the user's request is unclear, create a reasonable title based on keywords
-- Examples: "Todo App", "Landing Page", "Chat Interface", "API Integration"
-
-User request: "${userContentStr.slice(0, 500)}"
-
-Title:`
-                    };
-
-                    try {
-                        let generatedTitle = '';
-                        await sendMessage(
-                            [titlePrompt],
-                            'mimo-v2-flash',
-                            apiKey,
-                            (content) => { if (content) generatedTitle += content; },
-                            abortControllerRef.current?.signal,
-
-
-                        );
-
-                        const cleanTitle = generatedTitle.trim().replace(/^["']|["']$/g, '');
-                        if (cleanTitle) {
-                            await updateChatTitle(chatId, cleanTitle);
-
-                            // Update local store immediately
-                            const currentChats = useStore.getState().chats;
-                            if (currentChats.length > 0) {
-                                const updatedChats = currentChats.map(c =>
-                                    c.id === chatId ? { ...c, title: cleanTitle } : c
-                                );
-                                useStore.getState().setChats(updatedChats);
-                            }
-                        }
-                    } catch (err) {
-                        console.error('Failed to generate initial title:', err);
-                    }
+                    generateAndSaveTitle(userContentStr, chatId).catch(() => {});
                 }
             }
 
             let turns = 0;
-            const MAX_TURNS = 50;
+            const MAX_TURNS = 80;
 
             // Track which tools we've already shown in the UI during this session
             // Maps toolCallId -> actionId (our local UI id)
@@ -836,6 +911,26 @@ Title:`
                 // Clean tool_call tags that some models output incorrectly
                 cleanContent = cleanContent.replace(/<tool_call>/g, '').trim();
 
+                // If AI responded with tool_calls but no text on the first turn,
+                // add an auto-generated status message so the user sees something
+                if (!cleanContent && toolCalls.length > 0) {
+                    const toolNames = toolCalls.map(tc => tc.function.name);
+                    if (turns === 0) {
+                        // First turn — show a friendly starting message
+                        if (toolNames.includes('runCommand')) {
+                            cleanContent = '⚙️ Setting up the project...';
+                        } else if (toolNames.some(n => n === 'createFile' || n === 'batchCreateFiles')) {
+                            cleanContent = '🔨 Building the project...';
+                        } else if (toolNames.includes('readFile') || toolNames.includes('readMultipleFiles') || toolNames.includes('listFiles')) {
+                            cleanContent = '📖 Analyzing the project...';
+                        } else {
+                            cleanContent = '🚀 Working on it...';
+                        }
+                    }
+                    // Update the UI with this auto-text (even if empty — to ensure tool_calls render)
+                    updateLastMessage(cleanContent, toolCalls, thinkingContent || undefined, undefined);
+                }
+
                 const assistantMessage: Message = {
                     role: 'assistant',
                     content: cleanContent || null,
@@ -858,8 +953,14 @@ Title:`
                 if (toolCalls.length === 0) {
                     // No tool calls - AI is done or just responded with text
                     console.log('[Chat] AI response (no tool calls):', cleanContent?.slice(0, 200));
-                    console.log('[Chat] Done - no tool calls received');
+                    console.log('[Chat] Done - no tool calls received, ending loop');
                     break;
+                }
+
+                // If AI responded with only empty content and no tool calls on a non-first turn,
+                // it might be confused. Log it.
+                if (!cleanContent && toolCalls.length > 0) {
+                    console.log(`[Chat] Turn ${turns + 1}: AI sent ${toolCalls.length} tool calls without text`);
                 }
 
                 console.log(`[Chat] Running ${toolCalls.length} tool(s)...`);
@@ -907,17 +1008,36 @@ Title:`
                         result = await handleToolCall(toolCall);
                     } catch (err: any) {
                         console.error('Tool execution error:', err);
-                        result = `Error executing tool ${toolCall.function.name}: ${err.message}`;
+                        result = `Error executing tool ${toolCall.function.name}: ${err.message}.\n\n⚠️ Suggestion: Try a different approach or use readFile to check the current state.`;
                     }
 
                     // Update action status to done or error
                     if (actionId) {
-                        const newStatus = result.startsWith('Error') ? 'error' : 'done';
-                        console.log(`[Actions] Updating ${toolCall.function.name} (${actionId}) to ${newStatus}`);
+                        // Only mark as error if it's a real tool failure, not informational output
+                        const isToolError = (
+                            result.startsWith('Error ') ||
+                            result.startsWith('[SYSTEM] ❌') ||
+                            result.includes('crashed') ||
+                            result.includes('FAILED')
+                        ) && !result.includes('[SYSTEM] ✅') && !result.includes('TypeScript check found');
+
+                        const newStatus = isToolError ? 'error' : 'done';
+                        console.log(`[Actions] ${toolCall.function.name} (${actionId}) → ${newStatus}`);
                         updateAction(actionId, {
                             status: newStatus,
-                            result
+                            result,
+                            args: toolCall.function.arguments || ''
                         });
+
+                        // Track consecutive errors for loop detection
+                        if (isToolError) {
+                            consecutiveErrorCount++;
+                            if (toolCall.function.name === 'editFile') {
+                                editFileFailCount++;
+                            }
+                        } else {
+                            consecutiveErrorCount = 0; // Reset on success
+                        }
                     } else {
                         console.warn(`[Actions] No actionId found for toolCall ${toolCall.id}`);
                     }
@@ -938,18 +1058,44 @@ Title:`
                     }
                 }
 
-                // If dev server started, break the loop - task is complete
+                // If dev server started, let AI know but don't force-break
+                // AI should naturally stop after seeing the server is running
                 if (devServerStarted) {
-                    console.log('[Chat] Dev server started, ending AI loop');
+                    console.log('[Chat] Dev server started');
 
-                    // Add a final message so user knows the project is ready
-                    addMessage({
-                        role: 'assistant',
-                        content: '✅ **Project is ready!** The development server is now running. You can see the preview on the right side, or click the preview tab to view your application.'
-                    });
-
-                    break;
+                    // Inject a system hint so AI knows to wrap up
+                    const devServerHint: Message = {
+                        role: 'system',
+                        content: '✅ DEV SERVER IS NOW RUNNING. The preview is available. If there are no errors to fix, tell the user the project is ready and STOP calling tools.'
+                    };
+                    currentMessages.push(devServerHint);
+                    // Don't break — let AI do one more turn to provide a summary
                 }
+
+                // Loop detection: too many consecutive errors
+                if (consecutiveErrorCount >= MAX_CONSECUTIVE_ERRORS) {
+                    console.log(`[Chat] Loop detected: ${consecutiveErrorCount} consecutive errors, injecting recovery hint`);
+                    const recoveryMessage: Message = {
+                        role: 'system',
+                        content: `⚠️ LOOP DETECTED: ${consecutiveErrorCount} consecutive tool errors. STOP and change your approach:\n1. Use getErrors() to see all current errors\n2. Use readFile() to check the actual file content\n3. If editFile keeps failing, use createFile to rewrite the entire file\n4. If pnpm install fails, check the package name with searchWeb\n5. Take a step back and think about what's actually wrong`
+                    };
+                    currentMessages.push(recoveryMessage);
+                    addMessage(recoveryMessage);
+                    consecutiveErrorCount = 0; // Reset to give AI another chance
+                }
+
+                // Loop detection: editFile keeps failing
+                if (editFileFailCount >= MAX_EDIT_FAILS) {
+                    console.log(`[Chat] editFile loop detected: ${editFileFailCount} failures, injecting hint`);
+                    const editHint: Message = {
+                        role: 'system',
+                        content: `⚠️ editFile has failed ${editFileFailCount} times. STOP using editFile for this file. Use createFile to rewrite the entire file instead. Call readFile first to see the current content, then createFile with the complete updated content.`
+                    };
+                    currentMessages.push(editHint);
+                    addMessage(editHint);
+                    editFileFailCount = 0;
+                }
+
                 turns++;
             }
 
@@ -1060,9 +1206,17 @@ Title:`
                         }
                     }
                 }
-                addMessage({ role: 'assistant', content: 'Stopped by user.' });
+
+                // Update the empty placeholder instead of adding a new message
+                const stateAfter = useStore.getState();
+                const last = stateAfter.messages[stateAfter.messages.length - 1];
+                if (last?.role === 'assistant' && !last.content && !last.tool_calls?.length) {
+                    updateLastMessage('Stopped by user.');
+                } else {
+                    addMessage({ role: 'assistant', content: 'Stopped by user.' });
+                }
             } else {
-                console.error(error);
+                console.error('[Chat] Error:', error);
                 const errorMessage = error?.message || 'Failed to get response';
 
                 // Same check for errors
@@ -1084,7 +1238,15 @@ Title:`
                         }
                     }
                 }
-                addMessage({ role: 'assistant', content: `Error: ${errorMessage}` });
+
+                // Update empty placeholder instead of adding new message
+                const stateAfter = useStore.getState();
+                const last = stateAfter.messages[stateAfter.messages.length - 1];
+                if (last?.role === 'assistant' && !last.content && !last.tool_calls?.length) {
+                    updateLastMessage(`Error: ${errorMessage}`);
+                } else {
+                    addMessage({ role: 'assistant', content: `Error: ${errorMessage}` });
+                }
             }
         } finally {
             setIsLoading(false);
@@ -1127,6 +1289,10 @@ Title:`
                 chatId = chat.id;
                 setCurrentChatId(chat.id);
                 navigate(`/c/${chat.id}`, { replace: true });
+
+                // Update chats in store so titleGenerator can find this chat
+                const currentChats = useStore.getState().chats;
+                useStore.getState().setChats([chat, ...currentChats]);
             } catch (err) {
                 console.error('Failed to create chat:', err);
                 return;
@@ -1135,6 +1301,16 @@ Title:`
 
         // Build AI message (what AI receives) - full file contents
         let aiText = input;
+
+        // Capture selected element before clearing
+        const pickedElementForSend = selectedElement ? { ...selectedElement } : null;
+
+        // Prepend selected element context if user picked an element from preview
+        if (pickedElementForSend) {
+            aiText = `[User selected this element from the preview]\nElement: ${pickedElementForSend.tag}\nSelector: ${pickedElementForSend.selector}\nText content: "${pickedElementForSend.text}"\n\nUser request: ${aiText}`;
+            setSelectedElement(null); // Clear after sending
+        }
+
         if (selectedDocuments.length > 0) {
             const docsContext = selectedDocuments.map(doc =>
                 `\n\n[User attached file: ${doc.name}]\n\`\`\`${doc.type.split('/')[1] || 'text'}\n${doc.content}\n\`\`\``
@@ -1154,6 +1330,11 @@ Title:`
             };
         } else {
             displayMessage = { role: 'user', content: input };
+        }
+
+        // Save picked element info for display in chat
+        if (pickedElementForSend) {
+            displayMessage.pickedElement = pickedElementForSend;
         }
 
         // Add attachments with content to display message (for transfer to workbench)
@@ -1245,62 +1426,104 @@ Title:`
                                 </div>
                             )}
 
-                            <div className={`flex ${group.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                                <div
-                                    className={`text-[14px] leading-relaxed ${group.role === 'user'
-                                        ? isDark ? 'bg-[#1f1f1f] text-[#e5e5e5] rounded-2xl px-4 py-2.5 max-w-[85%]' : 'bg-gray-100 text-gray-900 rounded-2xl px-4 py-2.5 max-w-[85%]'
-                                        : isDark ? 'text-[#e5e5e5] max-w-full' : 'text-gray-800 max-w-full'
-                                        }`}
-                                >
-                                    {group.content && (
-                                        <div className={`prose prose-sm max-w-none ${isDark ? 'prose-invert prose-pre:bg-[#1a1a1a] prose-pre:border prose-pre:border-[#2a2a2a] prose-pre:rounded-lg prose-code:text-[#e5e5e5]' : 'prose-pre:bg-gray-50 prose-pre:border prose-pre:border-gray-200 prose-pre:rounded-lg'}`}>
-                                            {Array.isArray(group.content) ? (
-                                                <div className="space-y-2">
-                                                    {group.content.map((part, i) => {
-                                                        if (part.type === 'image_url') {
-                                                            return (
-                                                                <img key={i} src={part.image_url.url} alt="" className="max-w-full rounded-lg max-h-[250px] object-contain" />
-                                                            );
-                                                        }
-                                                        return <ReactMarkdown
-                                                            key={i}
-                                                            remarkPlugins={[remarkGfm]}
-                                                            components={markdownComponents}
-                                                        >
-                                                            {part.text.replace(/^\[SYSTEM\] .*/gm, '')}
-                                                        </ReactMarkdown>;
-                                                    })}
+                            {/* Render segments in order for assistant messages */}
+                            {group.role === 'assistant' && group.segments && group.segments.length > 0 ? (
+                                <>
+                                    {group.segments.map((seg, segIdx) => {
+                                        if (seg.type === 'text' && seg.content) {
+                                            const textContent = typeof seg.content === 'string' ? seg.content : '';
+                                            if (!textContent) return null;
+                                            return (
+                                                <div key={`seg-${segIdx}`} className="flex justify-start">
+                                                    <div className={`text-[14px] leading-relaxed ${isDark ? 'text-[#e5e5e5] max-w-full' : 'text-gray-800 max-w-full'}`}>
+                                                        <div className={`prose prose-sm max-w-none ${isDark ? 'prose-invert prose-pre:bg-[#1a1a1a] prose-pre:border prose-pre:border-[#2a2a2a] prose-pre:rounded-lg prose-code:text-[#e5e5e5]' : 'prose-pre:bg-gray-50 prose-pre:border prose-pre:border-gray-200 prose-pre:rounded-lg'}`}>
+                                                            <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
+                                                                {textContent.replace(/^\[SYSTEM\] .*/gm, '')}
+                                                            </ReactMarkdown>
+                                                        </div>
+                                                    </div>
                                                 </div>
-                                            ) : (
-                                                <ReactMarkdown
-                                                    remarkPlugins={[remarkGfm]}
-                                                    components={markdownComponents}
-                                                >
-                                                    {group.content.replace(/^\[SYSTEM\] .*/gm, '')}
-                                                </ReactMarkdown>
+                                            );
+                                        }
+                                        if (seg.type === 'tools' && seg.toolCalls && seg.toolCalls.length > 0) {
+                                            // If this is the last segment and we're live, show live actions
+                                            const isLastSegment = segIdx === group.segments!.length - 1;
+                                            const showLive = isLoading && isLastSegment && idx === groupedMessages.length - 1 && actions.length > 0;
+
+                                            if (showLive) {
+                                                return <ActionsList key={`seg-${segIdx}`} actions={actions.filter(a => a.toolName !== 'drawDiagram')} isLive={true} isDark={isDark} />;
+                                            }
+                                            return (
+                                                <ActionsList
+                                                    key={`seg-${segIdx}`}
+                                                    actions={seg.toolCalls.filter(tc => tc.call.function.name !== 'drawDiagram').map((tc, i) => ({
+                                                        id: `completed_${idx}_${segIdx}_${i}`,
+                                                        toolName: tc.call.function.name,
+                                                        displayName: getActionDisplayName(tc.call.function.name, tc.call.function.arguments || ''),
+                                                        status: tc.result?.startsWith('Error') ? 'error' as const : 'done' as const,
+                                                        result: tc.result,
+                                                        args: tc.call.function.arguments || ''
+                                                    }))}
+                                                    isDark={isDark}
+                                                />
+                                            );
+                                        }
+                                        return null;
+                                    })}
+                                    {/* Live actions if no segments have tools yet */}
+                                    {isLoading && idx === groupedMessages.length - 1 && actions.length > 0 && !group.segments.some(s => s.type === 'tools') && (
+                                        <ActionsList actions={actions.filter(a => a.toolName !== 'drawDiagram')} isLive={true} isDark={isDark} />
+                                    )}
+                                </>
+                            ) : (
+                                <>
+                                    {/* Fallback: user messages or assistant without segments */}
+                                    <div className={`flex ${group.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                                        <div
+                                            className={`text-[14px] leading-relaxed ${group.role === 'user'
+                                                ? isDark ? 'bg-[#1f1f1f] text-[#e5e5e5] rounded-2xl px-4 py-2.5 max-w-[85%]' : 'bg-gray-100 text-gray-900 rounded-2xl px-4 py-2.5 max-w-[85%]'
+                                                : isDark ? 'text-[#e5e5e5] max-w-full' : 'text-gray-800 max-w-full'
+                                                }`}
+                                        >
+                                            {/* Picked element indicator */}
+                                            {group.role === 'user' && (group as any).pickedElement && (
+                                                <div className={`flex items-center gap-1.5 mb-2 text-xs ${isDark ? 'text-blue-400/70' : 'text-blue-500/70'}`}>
+                                                    <MousePointer2 className="w-3 h-3 flex-shrink-0" />
+                                                    <span className="font-medium">
+                                                        {(group as any).pickedElement.selector.split('.')[0].split('#')[0].toUpperCase()}
+                                                    </span>
+                                                    {(group as any).pickedElement.text && (
+                                                        <span className="truncate opacity-70">
+                                                            {(group as any).pickedElement.text.length > 30
+                                                                ? (group as any).pickedElement.text.slice(0, 30) + '…'
+                                                                : (group as any).pickedElement.text}
+                                                        </span>
+                                                    )}
+                                                </div>
+                                            )}
+                                            {group.content && (
+                                                <div className={`prose prose-sm max-w-none ${isDark ? 'prose-invert prose-pre:bg-[#1a1a1a] prose-pre:border prose-pre:border-[#2a2a2a] prose-pre:rounded-lg prose-code:text-[#e5e5e5]' : 'prose-pre:bg-gray-50 prose-pre:border prose-pre:border-gray-200 prose-pre:rounded-lg'}`}>
+                                                    {Array.isArray(group.content) ? (
+                                                        <div className="space-y-2">
+                                                            {group.content.map((part, i) => {
+                                                                if (part.type === 'image_url') {
+                                                                    return <img key={i} src={part.image_url.url} alt="" className="max-w-full rounded-lg max-h-[250px] object-contain" />;
+                                                                }
+                                                                return <ReactMarkdown key={i} remarkPlugins={[remarkGfm]} components={markdownComponents}>{part.text.replace(/^\[SYSTEM\] .*/gm, '')}</ReactMarkdown>;
+                                                            })}
+                                                        </div>
+                                                    ) : (
+                                                        <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
+                                                            {group.content.replace(/^\[SYSTEM\] .*/gm, '')}
+                                                        </ReactMarkdown>
+                                                    )}
+                                                </div>
                                             )}
                                         </div>
-                                    )}
-                                </div>
-                            </div>
-
-                            {/* Actions AFTER text content */}
-                            {group.role === 'assistant' && (
-                                <>
-                                    {isLoading && idx === groupedMessages.length - 1 && actions.length > 0 ? (
+                                    </div>
+                                    {/* Live actions for assistant without segments */}
+                                    {group.role === 'assistant' && isLoading && idx === groupedMessages.length - 1 && actions.length > 0 && (
                                         <ActionsList actions={actions.filter(a => a.toolName !== 'drawDiagram')} isLive={true} isDark={isDark} />
-                                    ) : (
-                                        group.toolCalls && group.toolCalls.length > 0 && (
-                                            <ActionsList
-                                                actions={group.toolCalls.filter(tc => tc.call.function.name !== 'drawDiagram').map((tc, i) => ({
-                                                    id: `completed_${idx}_${i}`,
-                                                    toolName: tc.call.function.name,
-                                                    displayName: getActionDisplayName(tc.call.function.name, tc.call.function.arguments || ''),
-                                                    status: tc.result?.startsWith('Error') ? 'error' as const : 'done' as const
-                                                }))}
-                                                isDark={isDark}
-                                            />
-                                        )
                                     )}
                                 </>
                             )}
@@ -1315,6 +1538,21 @@ Title:`
                     {/* Live Actions - only show here if there's no assistant message group yet */}
                     {isLoading && actions.length > 0 && (!groupedMessages.length || groupedMessages[groupedMessages.length - 1].role !== 'assistant') && (
                         <ActionsList actions={actions.filter(a => a.toolName !== 'drawDiagram')} isLive={true} isDark={isDark} />
+                    )}
+
+                    {/* Typing indicator — shows when AI is loading but hasn't produced any visible content yet */}
+                    {isLoading && !currentThinking && actions.length === 0 && (
+                        !groupedMessages.length ||
+                        groupedMessages[groupedMessages.length - 1].role === 'user' ||
+                        (groupedMessages[groupedMessages.length - 1].role === 'assistant' && !groupedMessages[groupedMessages.length - 1].content)
+                    ) && (
+                        <div className="flex justify-start animate-fade-in-up">
+                            <div className={`flex items-center gap-1.5 px-4 py-3 rounded-2xl ${isDark ? 'text-[#888]' : 'text-gray-400'}`}>
+                                <span className="w-2 h-2 rounded-full bg-current animate-bounce" style={{ animationDelay: '0ms' }} />
+                                <span className="w-2 h-2 rounded-full bg-current animate-bounce" style={{ animationDelay: '150ms' }} />
+                                <span className="w-2 h-2 rounded-full bg-current animate-bounce" style={{ animationDelay: '300ms' }} />
+                            </div>
+                        </div>
                     )}
 
                     <div ref={messagesEndRef} />
@@ -1369,6 +1607,30 @@ Title:`
                                         </button>
                                     </div>
                                 ))}
+                            </div>
+                        )}
+
+                        {/* Selected element from preview picker */}
+                        {selectedElement && (
+                            <div className={`flex items-center gap-2 px-3 py-2 border-b ${isDark ? 'border-[#2a2a2a]' : 'border-gray-200'}`}>
+                                <div className={`flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-xs max-w-full overflow-hidden ${isDark ? 'bg-blue-500/10 border border-blue-500/20' : 'bg-blue-50 border border-blue-200'}`}>
+                                    <MousePointer2 className={`w-3 h-3 flex-shrink-0 ${isDark ? 'text-blue-400' : 'text-blue-500'}`} />
+                                    <span className={`font-medium flex-shrink-0 ${isDark ? 'text-blue-400' : 'text-blue-600'}`}>
+                                        {selectedElement.selector.split('.')[0].split('#')[0].toUpperCase()}
+                                    </span>
+                                    {selectedElement.text && (
+                                        <span className={`truncate ${isDark ? 'text-zinc-400' : 'text-gray-500'}`}>
+                                            {selectedElement.text.length > 40 ? selectedElement.text.slice(0, 40) + '…' : selectedElement.text}
+                                        </span>
+                                    )}
+                                    <button
+                                        type="button"
+                                        onClick={() => setSelectedElement(null)}
+                                        className={`ml-auto flex-shrink-0 p-0.5 rounded hover:bg-red-500/20 ${isDark ? 'text-zinc-500 hover:text-red-400' : 'text-gray-400 hover:text-red-500'}`}
+                                    >
+                                        <X className="w-3 h-3" />
+                                    </button>
+                                </div>
                             </div>
                         )}
 
