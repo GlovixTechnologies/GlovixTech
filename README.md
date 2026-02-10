@@ -30,8 +30,6 @@ Place your screenshots in `public/screenshots/` with the exact names below.
 - `public/screenshots/s3.png` — Main menu / home screen  
   ![Main menu / landing](public/screenshots/s3.png)
 
-(If images do not render on GitHub Pages or preview, ensure files are committed to the `main` branch under `public/screenshots/`.)
-
 ## 🚀 Quick Start
 
 ### Prerequisites
