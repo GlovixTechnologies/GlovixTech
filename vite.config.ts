@@ -18,12 +18,6 @@ export default defineConfig(({ mode }) => {
     return {
         plugins: [
             react(),
-            {
-                name: 'coep-headers',
-                configResolved() {},
-                apply: 'serve',
-                enforce: 'pre',
-            },
         ],
         server: {
             host: '0.0.0.0',
@@ -35,6 +29,8 @@ export default defineConfig(({ mode }) => {
                 'Cross-Origin-Opener-Policy': 'same-origin',
                 'Cross-Origin-Resource-Policy': 'cross-origin',
             },
+            middlewareMode: false,
+            middlewares: [],
             proxy: {
                 // Simple, robust proxy mapping
                 '/api/ai/chat': {
