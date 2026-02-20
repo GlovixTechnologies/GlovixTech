@@ -16,15 +16,24 @@ export default defineConfig(({ mode }) => {
     console.log('----------------------------------------');
 
     return {
-        plugins: [react()],
+        plugins: [
+            react(),
+            {
+                name: 'coep-headers',
+                configResolved() {},
+                apply: 'serve',
+                enforce: 'pre',
+            },
+        ],
         server: {
             host: '0.0.0.0',
             port: 5174,
             allowedHosts: true,
             headers: {
-                // Use credentialless to allow loading external images
+                // Required for WebContainer/SharedArrayBuffer to work
                 'Cross-Origin-Embedder-Policy': 'credentialless',
                 'Cross-Origin-Opener-Policy': 'same-origin',
+                'Cross-Origin-Resource-Policy': 'cross-origin',
             },
             proxy: {
                 // Simple, robust proxy mapping
