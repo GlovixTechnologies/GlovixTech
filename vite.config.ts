@@ -23,9 +23,6 @@ export default defineConfig(({ mode }) => {
                 configResolved() {},
                 apply: 'serve',
                 enforce: 'pre',
-                async transform(code: string, id: string) {
-                    return null;
-                },
             },
         ],
         server: {

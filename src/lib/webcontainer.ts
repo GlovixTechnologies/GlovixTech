@@ -46,9 +46,9 @@ export async function getWebContainer() {
 }
 
 export async function mountFiles(files: Record<string, { file: { contents: string } }>) {
-    try {
-        const instance = await getWebContainer();
+    const instance = await getWebContainer();
 
+    try {
         const tree: FileSystemTree = {};
 
         for (const [path, file] of Object.entries(files)) {
