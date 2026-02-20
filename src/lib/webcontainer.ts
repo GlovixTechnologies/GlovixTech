@@ -19,57 +19,75 @@ export async function getWebContainer() {
     }
 
     if (!window._bootPromise) {
-        window._bootPromise = WebContainer.boot().then(async (instance) => {
-            window._webContainerInstance = instance;
-            webContainerInstance = instance;
-            instance.on('server-ready', (port, url) => {
-                console.log('[WebContainer] Server ready on port', port, '→', url);
-                useStore.getState().setPreviewUrl(url);
+        window._bootPromise = WebContainer.boot()
+            .then(async (instance) => {
+                window._webContainerInstance = instance;
+                webContainerInstance = instance;
+                instance.on('server-ready', (port, url) => {
+                    console.log('[WebContainer] Server ready on port', port, '→', url);
+                    useStore.getState().setPreviewUrl(url);
+                });
+                // Ensure .glovix system directory exists from the start
+                try { await instance.fs.mkdir('.glovix', { recursive: true }); } catch { /* ok */ }
+                return instance;
+            })
+            .catch((error: any) => {
+                console.error('[WebContainer] Boot failed:', error);
+                // Provide helpful error message for COOP/COEP issues
+                if (error?.message?.includes('SharedArrayBuffer') || error?.message?.includes('cross-origin')) {
+                    console.error('[WebContainer] SharedArrayBuffer/COEP Error: Ensure server has proper COEP headers');
+                    useStore.getState().setPreviewUrl('');
+                }
+                throw error;
             });
-            // Ensure .glovix system directory exists from the start
-            try { await instance.fs.mkdir('.glovix', { recursive: true }); } catch { /* ok */ }
-            return instance;
-        });
     }
 
     return window._bootPromise;
 }
 
 export async function mountFiles(files: Record<string, { file: { contents: string } }>) {
-    const instance = await getWebContainer();
+    try {
+        const instance = await getWebContainer();
 
-    const tree: FileSystemTree = {};
+        const tree: FileSystemTree = {};
 
-    for (const [path, file] of Object.entries(files)) {
-        const parts = path.split('/');
-        let current = tree;
+        for (const [path, file] of Object.entries(files)) {
+            const parts = path.split('/');
+            let current = tree;
 
-        for (let i = 0; i < parts.length - 1; i++) {
-            const part = parts[i];
-            if (!current[part]) {
-                current[part] = { directory: {} };
+            for (let i = 0; i < parts.length - 1; i++) {
+                const part = parts[i];
+                if (!current[part]) {
+                    current[part] = { directory: {} };
+                }
+
+                const node = current[part];
+                if (!('directory' in node)) {
+                    console.warn(`Path collision: ${path}. ${part} is treated as a file but expected as directory.`);
+                    current[part] = { directory: {} };
+                }
+
+                current = (current[part] as DirectoryNode).directory;
             }
 
-            const node = current[part];
-            if (!('directory' in node)) {
-                console.warn(`Path collision: ${path}. ${part} is treated as a file but expected as directory.`);
-                current[part] = { directory: {} };
-            }
-
-            current = (current[part] as DirectoryNode).directory;
+            const fileName = parts[parts.length - 1];
+            current[fileName] = { file: { contents: file.file.contents } };
         }
 
-        const fileName = parts[parts.length - 1];
-        current[fileName] = { file: { contents: file.file.contents } };
+        console.log('Mounting file tree:', tree);
+        await instance.mount(tree);
+
+        // Ensure .glovix directory always exists
+        try {
+            await instance.fs.mkdir('.glovix', { recursive: true });
+        } catch { /* already exists */ }
+    } catch (error: any) {
+        console.error('[mountFiles] Error:', error);
+        if (error?.message?.includes('SharedArrayBuffer') || error?.message?.includes('cross-origin')) {
+            console.error('[mountFiles] COEP Issue: Page needs Cross-Origin-Embedder-Policy headers');
+        }
+        throw error;
     }
-
-    console.log('Mounting file tree:', tree);
-    await instance.mount(tree);
-
-    // Ensure .glovix directory always exists
-    try {
-        await instance.fs.mkdir('.glovix', { recursive: true });
-    } catch { /* already exists */ }
 
     // Inject element picker script into index.html if it exists
     try {

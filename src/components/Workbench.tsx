@@ -105,7 +105,17 @@ export function Workbench() {
     useEffect(() => {
         const init = async () => {
             if (Object.keys(files).length > 0) {
-                await mountFiles(files);
+                try {
+                    await mountFiles(files);
+                } catch (error: any) {
+                    console.error('[Workbench] Mount error:', error);
+                    if (error?.message?.includes('SharedArrayBuffer') || error?.message?.includes('cross-origin')) {
+                        setErrorMsg('WebContainer COEP Error: Check server headers. Reload page if issue persists.');
+                    } else {
+                        setErrorMsg(`Failed to mount files: ${error?.message || 'Unknown error'}`);
+                    }
+                    setStatus('error');
+                }
             }
         };
         init();
