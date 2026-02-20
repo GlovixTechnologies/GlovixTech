@@ -30,13 +30,13 @@ export default defineConfig(({ mode }) => {
                 'Cross-Origin-Resource-Policy': 'cross-origin',
             },
             middlewares: [
-                (_req, res, next) => {
+                (req, res, next) => {
                     res.setHeader('Cross-Origin-Embedder-Policy', 'credentialless');
                     res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
                     res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
                     next();
                 },
-            ],
+            ] as any,
             proxy: {
                 // Simple, robust proxy mapping
                 '/api/ai/chat': {
