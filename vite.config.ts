@@ -1,6 +1,7 @@
 
 import { defineConfig, loadEnv } from 'vite';
 import react from '@vitejs/plugin-react';
+import type { Connect } from 'vite';
 
 // https://vitejs.dev/config/
 export default defineConfig(({ mode }) => {
@@ -29,8 +30,14 @@ export default defineConfig(({ mode }) => {
                 'Cross-Origin-Opener-Policy': 'same-origin',
                 'Cross-Origin-Resource-Policy': 'cross-origin',
             },
-            middlewareMode: false,
-            middlewares: [],
+            middlewares: [
+                (req: Connect.IncomingMessage, res: Connect.ServerResponse, next: Connect.NextFunction) => {
+                    res.setHeader('Cross-Origin-Embedder-Policy', 'credentialless');
+                    res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
+                    res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+                    next();
+                },
+            ],
             proxy: {
                 // Simple, robust proxy mapping
                 '/api/ai/chat': {

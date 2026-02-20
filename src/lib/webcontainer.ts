@@ -18,6 +18,13 @@ export async function getWebContainer() {
         return webContainerInstance;
     }
 
+    // Check if the page is cross-origin isolated
+    if (!self.crossOriginIsolated) {
+        console.warn('[WebContainer] Page is not cross-origin isolated. Checking if reload is needed...');
+        // Give the page a moment to ensure headers are applied
+        await new Promise(resolve => setTimeout(resolve, 100));
+    }
+
     if (!window._bootPromise) {
         window._bootPromise = WebContainer.boot()
             .then(async (instance) => {
@@ -35,7 +42,8 @@ export async function getWebContainer() {
                 console.error('[WebContainer] Boot failed:', error);
                 // Provide helpful error message for COOP/COEP issues
                 if (error?.message?.includes('SharedArrayBuffer') || error?.message?.includes('cross-origin')) {
-                    console.error('[WebContainer] SharedArrayBuffer/COEP Error: Ensure server has proper COEP headers');
+                    console.error('[WebContainer] SharedArrayBuffer/COEP Error: Page headers not properly set');
+                    console.log('[WebContainer] crossOriginIsolated:', self.crossOriginIsolated);
                     useStore.getState().setPreviewUrl('');
                 }
                 throw error;
